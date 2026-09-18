@@ -1,6 +1,5 @@
-mod p2p;
-
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
+use nearshare_rs::p2p;
 use actix_multipart::Multipart;
 use futures_util::{StreamExt, TryStreamExt};
 use actix_web::middleware::Logger;

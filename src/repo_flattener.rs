@@ -87,6 +87,44 @@ pub fn sanitize_filename(input: &str) -> String {
     }
 }
 
+pub fn collect_repo_files(repo_path: &Path, max_bytes: u64) -> Vec<FileInfo> {
+    let mut files = Vec::new();
+    let walker = ignore::WalkBuilder::new(repo_path)
+        .hidden(false)
+        .git_ignore(true)
+        .build();
+
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if entry.path().components().any(|c| c.as_os_str() == ".git") {
+            continue;
+        }
+
+        let rel = match entry.path().strip_prefix(repo_path) {
+            Ok(p) => p.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let content = if size <= max_bytes && !is_binary(entry.path()) {
+            fs::read_to_string(entry.path()).ok()
+        } else {
+            None
+        };
+
+        files.push(FileInfo { rel, size, content });
+    }
+
+    files.sort_by(|a, b| a.rel.cmp(&b.rel));
+    files
+}
+
 pub fn is_binary(path: &Path) -> bool {
     fs::read(path)
         .map(|b| b.iter().take(4096).any(|&x| x == 0))

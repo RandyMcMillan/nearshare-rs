@@ -12,6 +12,7 @@ use std::path::Path;
 use crate::AppState;
 use crate::models::*;
 use crate::clear_uploads_dir;
+use crate::repo_flattener;
 
 pub async fn index() -> impl Responder {
     match fs::read_to_string("frontend.html").await {
@@ -143,6 +144,9 @@ pub async fn upload_file(
             }
         }
     }
+
+    let new_git_repos = git_repos.clone();
+
     let meta_path = "uploads/.nearshare-meta.json";
     let mut meta: UploadMeta = if Path::new(meta_path).exists() {
         fs::read_to_string(meta_path).await
@@ -208,6 +212,37 @@ pub async fn upload_file(
         let mut file = fs::File::create(&final_path).await.unwrap();
         file.write_all(&encrypted_data).await.unwrap();
         files_saved.push(rel_str);
+    }
+
+    // Generate flat HTML for newly detected git repos
+    for repo in &new_git_repos {
+        let repo_tmp_path = if repo == "." {
+            tmp_path_obj.to_path_buf()
+        } else {
+            tmp_path_obj.join(repo)
+        };
+
+        if repo_tmp_path.exists() {
+            let flat_files = repo_flattener::collect_repo_files(&repo_tmp_path, 51200);
+            if let Ok(html) = repo_flattener::build_html(&format!("file://{}", repo), flat_files) {
+                let flat_name = if repo == "." {
+                    "repo_flat.html".to_string()
+                } else {
+                    format!("{}_flat.html", repo)
+                };
+
+                let nonce_bytes = rand::thread_rng().r#gen::<[u8; 12]>();
+                let nonce = Nonce::from(nonce_bytes);
+                if let Ok(ciphertext) = state.encryption_key.encrypt(&nonce, html.as_bytes()) {
+                    let mut encrypted = Vec::new();
+                    encrypted.extend_from_slice(&nonce_bytes);
+                    encrypted.extend_from_slice(&ciphertext);
+                    let flat_path = format!("uploads/{}", flat_name);
+                    let _ = fs::write(&flat_path, &encrypted).await;
+                    files_saved.push(flat_name);
+                }
+            }
+        }
     }
 
     let _ = fs::remove_dir_all(&tmp_base).await;

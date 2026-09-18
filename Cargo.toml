@@ -19,3 +19,9 @@ libp2p = { version = "0.54", features = ["tokio", "mdns", "noise", "yamux", "tcp
 serde_json = "1.0"
 anyhow = "1.0"
 ignore = "0.4"
+
+[dev-dependencies]
+clap = { version = "4", features = ["derive"] }
+regex = "1"
+walkdir = "2"
+tempfile = "3"

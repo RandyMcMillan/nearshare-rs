@@ -164,7 +164,11 @@ impl P2PNode {
             .timeout(Duration::from_secs(20))
             .boxed();
 
-        let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
+        let mdns_config = mdns::Config {
+            query_interval: Duration::from_secs(10),
+            ..Default::default()
+        };
+        let mdns = mdns::tokio::Behaviour::new(mdns_config, local_peer_id)?;
 
         let rr = request_response::cbor::Behaviour::new(
             [(StreamProtocol::new(PROTOCOL), ProtocolSupport::Full)],
@@ -177,7 +181,8 @@ impl P2PNode {
             transport,
             behaviour,
             local_peer_id,
-            SwarmConfig::with_tokio_executor(),
+            SwarmConfig::with_tokio_executor()
+                .with_idle_connection_timeout(Duration::from_secs(300)),
         );
 
         swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
@@ -223,8 +228,16 @@ impl P2PNode {
         match event {
             SwarmEvent::Behaviour(NearShareBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                 for (peer_id, addr) in list {
+                    if peer_id == self.handle.local_peer_id {
+                        continue;
+                    }
                     println!("[p2p] Discovered peer: {} at {}", peer_id, addr);
                     self.swarm.add_peer_address(peer_id, addr.clone());
+                    if let Err(e) = self.swarm.dial(peer_id) {
+                        println!("[p2p] Dial to {} failed: {:?}", peer_id, e);
+                    } else {
+                        println!("[p2p] Dialing {} ...", peer_id);
+                    }
                     let mut peers = self.handle.peers.write().await;
                     peers.insert(peer_id, PeerInfo {
                         peer_id: peer_id.to_string(),
@@ -283,6 +296,21 @@ impl P2PNode {
             }
             SwarmEvent::NewListenAddr { address, .. } => {
                 println!("[p2p] Listening on {}", address);
+            }
+            SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                println!("[p2p] Connected to {} via {}", peer_id, endpoint.get_remote_address());
+            }
+            SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                if let Some(c) = cause {
+                    println!("[p2p] Disconnected from {}: {:?}", peer_id, c);
+                } else {
+                    println!("[p2p] Disconnected from {}", peer_id);
+                }
+            }
+            SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                if let Some(pid) = peer_id {
+                    println!("[p2p] Outgoing connection error to {}: {:?}", pid, error);
+                }
             }
             _ => {}
         }

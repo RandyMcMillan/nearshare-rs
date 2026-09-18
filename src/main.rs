@@ -306,6 +306,11 @@ async fn main() -> std::io::Result<()> {
         .or_else(|_| env::var("HOSTNAME"))
         .unwrap_or_else(|_| "SecureFileShare".to_string());
 
+    let port: u16 = env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080);
+
     let (p2p_node, p2p_handle) = p2p::P2PNode::new(hostname.clone()).await
         .expect("Failed to create P2P node");
     tokio::spawn(p2p_node.run());
@@ -324,13 +329,13 @@ async fn main() -> std::io::Result<()> {
     "SecureFileShare",             // Instance name
     &hostname_mdns,                // Hostname
     "",                            // IP address (empty is fine)
-    8080,                          // Port
+    port,                          // Port
     None                           // TXT records
     ).expect("Invalid Service Info");
 
     mdns.register(service_info).expect("failed to register mdns servifce");
 
-    println!("NearShare-rs starting at port 8080");
+    println!("NearShare-rs starting at port {}", port);
     println!("use username:admin password:password");
 
 
@@ -350,7 +355,7 @@ async fn main() -> std::io::Result<()> {
                     .route("/api/send/{peer_id}/{filename}", web::post().to(send_file_to_peer))
                     .route("/api/incoming", web::get().to(list_incoming))
         })
-        .bind("0.0.0.0:8080")?
+        .bind(format!("0.0.0.0:{}", port))?
         .run()
         .await
 }

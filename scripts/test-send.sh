@@ -4,6 +4,7 @@ set -e
 
 pkill -f nearshare-rs 2>/dev/null || true
 sleep 1
+rm -rf uploads/incoming/* 2>/dev/null || true
 
 BIN="${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 2>/dev/null | grep -o '"target_directory":"[^"]*"' | cut -d'"' -f4)}"/release/nearshare-rs
 
@@ -69,10 +70,10 @@ INCOMING=$(curl -s http://localhost:8081/api/incoming -H "Authorization: Bearer 
 echo "$INCOMING"
 
 echo ""
-if [ "$INCOMING" != "[]" ]; then
+if echo "$INCOMING" | grep -q "nearshare-test.txt"; then
     echo "✅ Send test PASSED — file arrived at peer"
 else
-    echo "❌ Send test FAILED — no incoming files on instance 2"
+    echo "❌ Send test FAILED — nearshare-test.txt not found in incoming files on instance 2"
     echo ""
     echo "=== Instance 1 logs ==="
     cat /tmp/nearshare-send-1.log

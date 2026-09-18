@@ -99,18 +99,26 @@ impl P2PHandle {
         if !incoming_dir.exists() {
             return Ok(files);
         }
-        let mut entries = tokio::fs::read_dir(incoming_dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let peer_dir = entry.path();
-            if peer_dir.is_dir() {
-                let peer_id = peer_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
-                let mut peer_entries = tokio::fs::read_dir(&peer_dir).await?;
-                while let Some(file_entry) = peer_entries.next_entry().await? {
-                    if file_entry.file_type().await?.is_file() {
-                        let meta = file_entry.metadata().await?;
+        let mut peer_dirs = tokio::fs::read_dir(incoming_dir).await?;
+        while let Some(peer_entry) = peer_dirs.next_entry().await? {
+            let peer_dir = peer_entry.path();
+            if !peer_dir.is_dir() {
+                continue;
+            }
+            let peer_id = peer_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let mut stack = vec![peer_dir.clone()];
+            while let Some(dir) = stack.pop() {
+                let mut entries = tokio::fs::read_dir(&dir).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else {
+                        let meta = entry.metadata().await?;
+                        let rel = path.strip_prefix(&peer_dir).unwrap_or(&path);
                         files.push(IncomingFile {
                             from_peer: peer_id.clone(),
-                            filename: file_entry.file_name().to_string_lossy().to_string(),
+                            filename: rel.to_string_lossy().to_string(),
                             size: meta.len(),
                         });
                     }
@@ -354,6 +362,11 @@ impl P2PNode {
                 }
                 let temp_path = format!("{}/{}", temp_dir, filename);
                 let result = async {
+                    if chunk_index == 0 {
+                        if let Some(parent) = std::path::Path::new(&temp_path).parent() {
+                            tokio::fs::create_dir_all(parent).await?;
+                        }
+                    }
                     let mut file = if chunk_index == 0 {
                         tokio::fs::File::create(&temp_path).await?
                     } else {
@@ -398,8 +411,10 @@ impl P2PNode {
                         encrypted.extend_from_slice(&nonce_bytes);
                         encrypted.extend_from_slice(&ciphertext);
                         let final_dir = format!("uploads/incoming/{}", peer);
-                        tokio::fs::create_dir_all(&final_dir).await?;
                         let final_path = format!("{}/{}", final_dir, filename);
+                        if let Some(parent) = std::path::Path::new(&final_path).parent() {
+                            tokio::fs::create_dir_all(parent).await?;
+                        }
                         tokio::fs::write(&final_path, &encrypted).await?;
                         tokio::fs::remove_file(&temp_path).await?;
                         Ok::<(), std::io::Error>(())

@@ -517,9 +517,9 @@
           </label>
 
           <label class="drop-zone" id="dropzone" for="fileInput">
-            Drag files here or click to browse
+            Drag files or folders here, or click to browse
           </label>
-          <input type="file" id="fileInput" multiple class="hidden" />
+          <input type="file" id="fileInput" webkitdirectory multiple class="hidden" />
 
           <div class="actions" id="uploadActions">
             <button class="btn btn-primary" id="uploadBtn" onclick="uploadFile()">Upload Files</button>
@@ -812,12 +812,13 @@
 
       const formData = new FormData();
       for (const file of fileInput.files) {
-        formData.append('files', file);
+        const path = file.webkitRelativePath || file.name;
+        formData.append('files:' + path, file);
       }
 
       const uploadBtn = document.getElementById('uploadBtn');
       uploadBtn.disabled = true;
-      setStatus('uploadStatus', 'Encrypting and sending...');
+      setStatus('uploadStatus', `Encrypting and sending ${fileInput.files.length} file(s)...`);
 
       try {
         const response = await authorizedFetch('/api/upload', {
@@ -830,10 +831,11 @@
           return;
         }
 
+        const saved = await response.json();
         clearSelection();
         uploadToggle.checked = false;
         dropzone.style.display = 'none';
-        setStatus('uploadStatus', 'File uploaded successfully!', 'success');
+        setStatus('uploadStatus', `${saved.length} file(s) uploaded!`, 'success');
         await listFiles();
       } catch (err) {
         setStatus('uploadStatus', 'Network error during upload.', 'error');
@@ -846,7 +848,7 @@
       setStatus('filesStatus', `Downloading ${filename}...`);
 
       try {
-        const response = await authorizedFetch(`/api/download/${encodeURIComponent(filename)}`);
+        const response = await authorizedFetch(`/api/download?path=${encodeURIComponent(filename)}`);
         if (!response.ok) {
           setStatus('filesStatus', 'Download failed.', 'error');
           return;
@@ -857,7 +859,7 @@
         const a = document.createElement('a');
         a.style.display = 'none';
         a.href = url;
-        a.download = filename;
+        a.download = filename.split('/').pop();
         document.body.appendChild(a);
         a.click();
         window.URL.revokeObjectURL(url);
@@ -949,14 +951,14 @@
     async function sendFileToPeer(filename, peerId) {
       setStatus('filesStatus', `Sending ${filename}...`);
       try {
-        const response = await authorizedFetch(`/api/send/${encodeURIComponent(peerId)}/${encodeURIComponent(filename)}`, {
+        const response = await authorizedFetch(`/api/send?peer_id=${encodeURIComponent(peerId)}&path=${encodeURIComponent(filename)}`, {
           method: 'POST'
         });
         if (!response.ok) {
           setStatus('filesStatus', 'Send failed.', 'error');
           return;
         }
-        setStatus('filesStatus', `${filename} sent!`, 'success');
+        setStatus('filesStatus', `${filename.split('/').pop()} sent!`, 'success');
       } catch (err) {
         setStatus('filesStatus', 'Network error during send.', 'error');
       }
@@ -982,7 +984,7 @@
       for (const file of files) {
         for (const peer of peersCache) {
           try {
-            const response = await authorizedFetch(`/api/send/${encodeURIComponent(peer.peer_id)}/${encodeURIComponent(file)}`, {
+            const response = await authorizedFetch(`/api/send?peer_id=${encodeURIComponent(peer.peer_id)}&path=${encodeURIComponent(file)}`, {
               method: 'POST'
             });
             if (response.ok) {
@@ -1007,7 +1009,7 @@
     async function downloadIncomingFile(filename, fromPeer) {
       setStatus('incomingStatus', `Downloading ${filename}...`);
       try {
-        const response = await authorizedFetch(`/api/download/incoming/${encodeURIComponent(fromPeer)}/${encodeURIComponent(filename)}`);
+        const response = await authorizedFetch(`/api/download/incoming?peer_id=${encodeURIComponent(fromPeer)}&path=${encodeURIComponent(filename)}`);
         if (!response.ok) {
           setStatus('incomingStatus', 'Download failed.', 'error');
           return;
@@ -1017,7 +1019,7 @@
         const a = document.createElement('a');
         a.style.display = 'none';
         a.href = url;
-        a.download = filename;
+        a.download = filename.split('/').pop();
         document.body.appendChild(a);
         a.click();
         window.URL.revokeObjectURL(url);
@@ -1122,7 +1124,9 @@
     fileInput.addEventListener('change', (e) => {
       const count = e.target.files.length;
       if (count) {
-        setStatus('uploadStatus', `${count} file(s) ready.`);
+        const paths = Array.from(e.target.files).map(f => f.webkitRelativePath || f.name);
+        const preview = paths.slice(0, 3).join(', ') + (paths.length > 3 ? ` ... +${paths.length - 3} more` : '');
+        setStatus('uploadStatus', `${count} file(s) ready: ${preview}`);
       }
     });
 

@@ -58,7 +58,7 @@ PEER2=$(curl -s http://localhost:8081/api/peer_id | python3 -c "import sys,json;
 echo "$PEER2"
 
 echo "=== Send file to instance 2 ==="
-curl -s -X POST "http://localhost:8080/api/send/$(python3 -c "import urllib.parse; print(urllib.parse.quote('$PEER2'))")/nearshare-test.txt" \
+curl -s -X POST "http://localhost:8080/api/send?peer_id=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$PEER2'))")&path=nearshare-test.txt" \
     -H "Authorization: Bearer $TOK1"
 echo ""
 

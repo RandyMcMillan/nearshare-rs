@@ -123,113 +123,182 @@ async fn logout(
 
 async fn upload_file(
     mut payload: Multipart,
-    state : web::Data<AppState>,
-    req: actix_web::HttpRequest
-) -> impl Responder{    
-    if authenticated_username(&req, &state).is_some() {
-        let mut files_saved = Vec::new();
+    state: web::Data<AppState>,
+    req: actix_web::HttpRequest,
+) -> impl Responder {
+    if authenticated_username(&req, &state).is_none() {
+        return HttpResponse::Unauthorized().finish();
+    }
 
-        while let Ok(Some(mut field)) = payload.try_next().await {
-            if let Some(_content_disposition) = field.content_disposition(){
-                let file_name = if let Some(content_disposition) = field.content_disposition(){
-                    content_disposition.get_filename().unwrap_or("unnamed").to_string()
-                }else {
-                    continue;
-                };
-                let mut data = Vec::new();
-                while let Some(chunck) = field.next().await{
-                    let chunck = chunck.unwrap();
-                    data.extend_from_slice(&chunck);
-                }
-                let nonce_bytes = rand::thread_rng().r#gen::<[u8;12]>();
-                let nonce = Nonce::from(nonce_bytes);
+    let tmp_id = format!("tmp-{}", rand::thread_rng().r#gen::<u64>());
+    let tmp_base = format!("uploads/.tmp/{}", tmp_id);
 
-                let ciphertext = state.encryption_key
-                                                                            .encrypt(&nonce, data.as_ref()).unwrap();
-                
-                let mut encrypted_data = Vec::new();
-                encrypted_data.extend_from_slice(&nonce_bytes);
-                encrypted_data.extend_from_slice(&ciphertext);
+    // Phase 1: stream all uploaded files into temp directory preserving paths
+    while let Ok(Some(mut field)) = payload.try_next().await {
+        let rel_path = field
+            .name()
+            .and_then(|n| n.strip_prefix("files:"))
+            .map(|s| s.to_string())
+            .or_else(|| {
+                field
+                    .content_disposition()
+                    .and_then(|cd| cd.get_filename())
+                    .map(|f| f.to_string())
+            })
+            .unwrap_or_else(|| "unnamed".to_string());
 
-                let file_path = format!("uploads/{}",file_name);
-                let mut file = fs::File::create(&file_path).await.unwrap();
-                file.write_all(&encrypted_data).await.unwrap();
-                files_saved.push(file_name);
-            }
+        let mut data = Vec::new();
+        while let Some(chunk) = field.next().await {
+            let chunk = chunk.unwrap();
+            data.extend_from_slice(&chunk);
         }
 
-        return HttpResponse::Ok().json(files_saved);
+        let tmp_path = format!("{}/{}", tmp_base, rel_path);
+        if let Some(parent) = Path::new(&tmp_path).parent() {
+            fs::create_dir_all(parent).await.unwrap();
+        }
+        let mut file = fs::File::create(&tmp_path).await.unwrap();
+        file.write_all(&data).await.unwrap();
     }
-    HttpResponse::Unauthorized().finish()
+
+    // Phase 2: walk temp directory respecting .gitignore, encrypt and move
+    let mut files_saved = Vec::new();
+    let walker = ignore::WalkBuilder::new(&tmp_base)
+        .hidden(false)
+        .git_ignore(true)
+        .build();
+
+    for entry in walker {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+            continue;
+        }
+        if entry.path().components().any(|c| c.as_os_str() == ".git") {
+            continue;
+        }
+
+        let rel_path = match entry.path().strip_prefix(&tmp_base) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        let rel_str = rel_path.to_string_lossy().to_string();
+
+        let data = match fs::read(entry.path()).await {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+
+        let nonce_bytes = rand::thread_rng().r#gen::<[u8; 12]>();
+        let nonce = Nonce::from(nonce_bytes);
+        let ciphertext = match state.encryption_key.encrypt(&nonce, data.as_ref()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let mut encrypted_data = Vec::new();
+        encrypted_data.extend_from_slice(&nonce_bytes);
+        encrypted_data.extend_from_slice(&ciphertext);
+
+        let final_path = format!("uploads/{}", rel_str);
+        if let Some(parent) = Path::new(&final_path).parent() {
+            fs::create_dir_all(parent).await.unwrap();
+        }
+        let mut file = fs::File::create(&final_path).await.unwrap();
+        file.write_all(&encrypted_data).await.unwrap();
+        files_saved.push(rel_str);
+    }
+
+    let _ = fs::remove_dir_all(&tmp_base).await;
+    HttpResponse::Ok().json(files_saved)
 }
 
 async fn list_files(
-    state : web::Data<AppState>,
-    req:actix_web::HttpRequest
-) -> impl Responder{
+    state: web::Data<AppState>,
+    req: actix_web::HttpRequest,
+) -> impl Responder {
     if authenticated_username(&req, &state).is_some() {
         let mut files = Vec::new();
-        let mut entries = fs::read_dir("uploads").await.unwrap();
-        while let Some(entry) = entries.next_entry().await.unwrap(){
-            if let Ok(file_type) = entry.file_type().await {
-                if !file_type.is_file() { continue; }
+        let walker = ignore::WalkBuilder::new("uploads")
+            .hidden(false)
+            .git_ignore(false)
+            .build();
+        for entry in walker {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            if !entry.file_type().map(|ft| ft.is_file()).unwrap_or(false) {
+                continue;
             }
-            if let Some(file_name) = entry.file_name().to_str(){
-                files.push(file_name.to_string());
+            let rel_path = match entry.path().strip_prefix("uploads") {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            let rel_str = rel_path.to_string_lossy().to_string();
+            if rel_str.starts_with("incoming") || rel_str.starts_with("/.tmp") || rel_str.starts_with(".tmp") {
+                continue;
             }
+            files.push(rel_str);
         }
-
-        return HttpResponse::Ok().json(files)
+        files.sort();
+        return HttpResponse::Ok().json(files);
     }
     HttpResponse::Unauthorized().finish()
 }
 
 
 async fn download_file(
-    path:web::Path<String>,
-    state : web::Data<AppState>,
-    req : actix_web::HttpRequest
-) -> impl Responder{
-    if authenticated_username(&req, &state).is_some() {
-        let file_name = path.as_str();
-        let file_path = format!("uploads/{}",file_name);
-        if Path::new(&file_path).exists(){
-            let encrypted_data = fs::read(&file_path).await.unwrap();
-            if encrypted_data.len() <12 {
-                return HttpResponse::InternalServerError().finish();
-            }
-            let (nonce_bytes,ciphertext) = encrypted_data.split_at(12);
-            #[allow(deprecated)]
-            let nonce = Nonce::from_slice(nonce_bytes);
-
-            return match state.encryption_key.decrypt(nonce, ciphertext){
-                Ok(decrypted_data) => {
-                    HttpResponse::Ok()
-                    .content_type("application/octet-stram")
-                    .append_header((
-                        "Content-Disposition",
-                        format!("attachment; filename=\"{}\"",file_name),
-                    
-                    )).body(decrypted_data)
-                }
-                Err(_) => HttpResponse::InternalServerError().body("Decryption Failed"),
-            };
-        }
-
-        return HttpResponse::NotFound().body("File Not Found");
-    }
-
-    HttpResponse::Unauthorized().finish()
-
-}
-
-async fn download_incoming_file(
-    path: web::Path<(String, String)>,
+    query: web::Query<HashMap<String, String>>,
     state: web::Data<AppState>,
     req: actix_web::HttpRequest,
 ) -> impl Responder {
     if authenticated_username(&req, &state).is_some() {
-        let (peer_id, file_name) = path.into_inner();
+        let file_name = query.get("path").cloned().unwrap_or_default();
+        if file_name.is_empty() {
+            return HttpResponse::BadRequest().body("Missing path parameter");
+        }
+        let file_path = format!("uploads/{}", file_name);
+        if Path::new(&file_path).exists() {
+            let encrypted_data = fs::read(&file_path).await.unwrap();
+            if encrypted_data.len() < 12 {
+                return HttpResponse::InternalServerError().finish();
+            }
+            let (nonce_bytes, ciphertext) = encrypted_data.split_at(12);
+            #[allow(deprecated)]
+            let nonce = Nonce::from_slice(nonce_bytes);
+
+            return match state.encryption_key.decrypt(nonce, ciphertext) {
+                Ok(decrypted_data) => {
+                    HttpResponse::Ok()
+                        .content_type("application/octet-stream")
+                        .append_header((
+                            "Content-Disposition",
+                            format!("attachment; filename=\"{}\"", Path::new(&file_name).file_name().unwrap_or_default().to_string_lossy()),
+                        ))
+                        .body(decrypted_data)
+                }
+                Err(_) => HttpResponse::InternalServerError().body("Decryption Failed"),
+            };
+        }
+        return HttpResponse::NotFound().body("File Not Found");
+    }
+    HttpResponse::Unauthorized().finish()
+}
+
+async fn download_incoming_file(
+    query: web::Query<HashMap<String, String>>,
+    state: web::Data<AppState>,
+    req: actix_web::HttpRequest,
+) -> impl Responder {
+    if authenticated_username(&req, &state).is_some() {
+        let peer_id = query.get("peer_id").cloned().unwrap_or_default();
+        let file_name = query.get("path").cloned().unwrap_or_default();
+        if peer_id.is_empty() || file_name.is_empty() {
+            return HttpResponse::BadRequest().body("Missing peer_id or path parameter");
+        }
         let file_path = format!("uploads/incoming/{}/{}", peer_id, file_name);
         if Path::new(&file_path).exists() {
             let encrypted_data = fs::read(&file_path).await.unwrap();
@@ -246,7 +315,7 @@ async fn download_incoming_file(
                         .content_type("application/octet-stream")
                         .append_header((
                             "Content-Disposition",
-                            format!("attachment; filename=\"{}\"", file_name),
+                            format!("attachment; filename=\"{}\"", Path::new(&file_name).file_name().unwrap_or_default().to_string_lossy()),
                         ))
                         .body(decrypted_data)
                 }
@@ -285,14 +354,18 @@ struct SendResult {
 }
 
 async fn send_file_to_peer(
-    path: web::Path<(String, String)>,
+    query: web::Query<HashMap<String, String>>,
     state: web::Data<AppState>,
     req: actix_web::HttpRequest,
 ) -> impl Responder {
     if authenticated_username(&req, &state).is_none() {
         return HttpResponse::Unauthorized().finish();
     }
-    let (peer_id_str, filename) = path.into_inner();
+    let peer_id_str = query.get("peer_id").cloned().unwrap_or_default();
+    let filename = query.get("path").cloned().unwrap_or_default();
+    if peer_id_str.is_empty() || filename.is_empty() {
+        return HttpResponse::BadRequest().body("Missing peer_id or path parameter");
+    }
     let peer_id = match peer_id_str.parse::<libp2p::PeerId>() {
         Ok(id) => id,
         Err(_) => return HttpResponse::BadRequest().body("Invalid peer ID"),
@@ -324,10 +397,15 @@ async fn clear_uploads_dir() -> std::io::Result<()> {
 
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
+        let file_name = entry.file_name();
+        if file_name == "incoming" {
+            continue;
+        }
         let metadata = entry.metadata().await?;
-
         if metadata.is_file() {
             fs::remove_file(path).await?;
+        } else if metadata.is_dir() {
+            fs::remove_dir_all(path).await?;
         }
     }
 
@@ -386,13 +464,13 @@ async fn main() -> std::io::Result<()> {
                     .route("/api/auth", web::post().to(authenticate))
                     .route("/api/session", web::get().to(session))
                     .route("/api/logout", web::post().to(logout))
-                    .route("/api/upload",web::post().to(upload_file))
+                    .route("/api/upload", web::post().to(upload_file))
                     .route("/api/files", web::get().to(list_files))
-                    .route("/api/download/{filename}", web::get().to(download_file))
-                    .route("/api/download/incoming/{peer_id}/{filename}", web::get().to(download_incoming_file))
+                    .route("/api/download", web::get().to(download_file))
+                    .route("/api/download/incoming", web::get().to(download_incoming_file))
                     .route("/api/peer_id", web::get().to(get_peer_id))
                     .route("/api/peers", web::get().to(list_peers))
-                    .route("/api/send/{peer_id}/{filename}", web::post().to(send_file_to_peer))
+                    .route("/api/send", web::post().to(send_file_to_peer))
                     .route("/api/incoming", web::get().to(list_incoming))
         })
         .bind(format!("0.0.0.0:{}", port))?

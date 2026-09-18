@@ -777,34 +777,26 @@
             if (peersCache.length > 0) {
               const sendBtn = document.createElement('button');
               sendBtn.className = 'btn btn-primary btn-compact';
-              sendBtn.textContent = 'Send';
-              sendBtn.onclick = () => {
-                if (peersCache.length === 1) {
-                  sendFileToPeer(file, peersCache[0].peer_id);
-                } else {
-                  const select = document.createElement('select');
-                  select.style.fontSize = '0.7rem';
-                  select.style.padding = '0.3rem';
-                  select.style.border = '3px solid var(--border)';
-                  peersCache.forEach(p => {
-                    const opt = document.createElement('option');
-                    opt.value = p.peer_id;
-                    opt.textContent = p.name;
-                    select.appendChild(opt);
-                  });
-                  const okBtn = document.createElement('button');
-                  okBtn.className = 'btn btn-primary btn-compact';
-                  okBtn.textContent = 'OK';
-                  okBtn.onclick = () => {
-                    sendFileToPeer(file, select.value);
-                    actions.removeChild(select);
-                    actions.removeChild(okBtn);
-                    actions.appendChild(sendBtn);
-                  };
-                  actions.removeChild(sendBtn);
-                  actions.appendChild(select);
-                  actions.appendChild(okBtn);
+              sendBtn.textContent = 'Send to All';
+              sendBtn.onclick = async () => {
+                sendBtn.disabled = true;
+                let sent = 0;
+                let failed = 0;
+                for (const peer of peersCache) {
+                  try {
+                    const response = await authorizedFetch(`/api/send?peer_id=${encodeURIComponent(peer.peer_id)}&path=${encodeURIComponent(file)}`, { method: 'POST' });
+                    if (response.ok) sent++; else failed++;
+                  } catch (err) {
+                    failed++;
+                  }
                 }
+                sendBtn.disabled = false;
+                if (failed === 0) {
+                  setStatus('filesStatus', `${file.split('/').pop()} sent to ${sent} peer(s)!`, 'success');
+                } else {
+                  setStatus('filesStatus', `${file.split('/').pop()}: sent ${sent}, failed ${failed}.`, 'error');
+                }
+                loadIncomingFiles();
               };
               actions.appendChild(sendBtn);
             }

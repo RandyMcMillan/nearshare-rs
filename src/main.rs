@@ -171,6 +171,9 @@ async fn list_files(
         let mut files = Vec::new();
         let mut entries = fs::read_dir("uploads").await.unwrap();
         while let Some(entry) = entries.next_entry().await.unwrap(){
+            if let Ok(file_type) = entry.file_type().await {
+                if !file_type.is_file() { continue; }
+            }
             if let Some(file_name) = entry.file_name().to_str(){
                 files.push(file_name.to_string());
             }
@@ -218,6 +221,41 @@ async fn download_file(
 
     HttpResponse::Unauthorized().finish()
 
+}
+
+async fn download_incoming_file(
+    path: web::Path<(String, String)>,
+    state: web::Data<AppState>,
+    req: actix_web::HttpRequest,
+) -> impl Responder {
+    if authenticated_username(&req, &state).is_some() {
+        let (peer_id, file_name) = path.into_inner();
+        let file_path = format!("uploads/incoming/{}/{}", peer_id, file_name);
+        if Path::new(&file_path).exists() {
+            let encrypted_data = fs::read(&file_path).await.unwrap();
+            if encrypted_data.len() < 12 {
+                return HttpResponse::InternalServerError().finish();
+            }
+            let (nonce_bytes, ciphertext) = encrypted_data.split_at(12);
+            #[allow(deprecated)]
+            let nonce = Nonce::from_slice(nonce_bytes);
+
+            return match state.encryption_key.decrypt(nonce, ciphertext) {
+                Ok(decrypted_data) => {
+                    HttpResponse::Ok()
+                        .content_type("application/octet-stream")
+                        .append_header((
+                            "Content-Disposition",
+                            format!("attachment; filename=\"{}\"", file_name),
+                        ))
+                        .body(decrypted_data)
+                }
+                Err(_) => HttpResponse::InternalServerError().body("Decryption Failed"),
+            };
+        }
+        return HttpResponse::NotFound().body("File Not Found");
+    }
+    HttpResponse::Unauthorized().finish()
 }
 
 #[derive(Serialize)]
@@ -311,7 +349,8 @@ async fn main() -> std::io::Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
 
-    let (p2p_node, p2p_handle) = p2p::P2PNode::new(hostname.clone()).await
+    let cipher_arc = Arc::new(cipher.clone());
+    let (p2p_node, p2p_handle) = p2p::P2PNode::new(hostname.clone(), cipher_arc).await
         .expect("Failed to create P2P node");
     tokio::spawn(p2p_node.run());
 
@@ -350,6 +389,7 @@ async fn main() -> std::io::Result<()> {
                     .route("/api/upload",web::post().to(upload_file))
                     .route("/api/files", web::get().to(list_files))
                     .route("/api/download/{filename}", web::get().to(download_file))
+                    .route("/api/download/incoming/{peer_id}/{filename}", web::get().to(download_incoming_file))
                     .route("/api/peer_id", web::get().to(get_peer_id))
                     .route("/api/peers", web::get().to(list_peers))
                     .route("/api/send/{peer_id}/{filename}", web::post().to(send_file_to_peer))

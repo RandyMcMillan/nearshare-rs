@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use aes_gcm::{Aes256Gcm, Nonce, aead::Aead};
 use libp2p::{
     identity::Keypair,
     mdns, noise, request_response, tcp, yamux,
@@ -10,6 +11,7 @@ use libp2p::{
     PeerId, StreamProtocol, Transport,
 };
 use libp2p::request_response::ProtocolSupport;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::io::AsyncWriteExt;
@@ -59,6 +61,7 @@ pub struct P2PHandle {
     pub name: String,
     peers: Arc<RwLock<HashMap<PeerId, PeerInfo>>>,
     cmd_tx: mpsc::Sender<P2PCommand>,
+    cipher: Arc<Aes256Gcm>,
 }
 
 impl Clone for P2PHandle {
@@ -68,6 +71,7 @@ impl Clone for P2PHandle {
             name: self.name.clone(),
             peers: Arc::clone(&self.peers),
             cmd_tx: self.cmd_tx.clone(),
+            cipher: Arc::clone(&self.cipher),
         }
     }
 }
@@ -131,6 +135,7 @@ pub struct P2PNode {
     cmd_rx: mpsc::Receiver<P2PCommand>,
     pending_responses: HashMap<request_response::OutboundRequestId, oneshot::Sender<NearShareResponse>>,
     outgoing_transfers: HashMap<request_response::OutboundRequestId, OutgoingTransfer>,
+    cipher: Arc<Aes256Gcm>,
 }
 
 struct OutgoingTransfer {
@@ -150,7 +155,7 @@ enum P2PCommand {
 }
 
 impl P2PNode {
-    pub async fn new(name: String) -> Result<(Self, P2PHandle)> {
+    pub async fn new(name: String, cipher: Arc<Aes256Gcm>) -> Result<(Self, P2PHandle)> {
         let keypair = Keypair::generate_ed25519();
         let local_peer_id = PeerId::from(keypair.public());
         println!("[p2p] Local PeerId: {}", local_peer_id);
@@ -195,6 +200,7 @@ impl P2PNode {
             name: name.clone(),
             peers: Arc::clone(&peers),
             cmd_tx,
+            cipher: Arc::clone(&cipher),
         };
 
         let node = P2PNode {
@@ -203,6 +209,7 @@ impl P2PNode {
             cmd_rx,
             pending_responses: HashMap::new(),
             outgoing_transfers: HashMap::new(),
+            cipher,
         };
 
         Ok((node, handle))
@@ -336,23 +343,23 @@ impl P2PNode {
                 total_chunks,
                 data,
             } => {
-                let incoming_dir = format!("uploads/incoming/{}", peer);
-                if let Err(e) = tokio::fs::create_dir_all(&incoming_dir).await {
-                    eprintln!("[p2p] Failed to create incoming dir: {}", e);
+                let temp_dir = format!("uploads/incoming/.tmp/{}", peer);
+                if let Err(e) = tokio::fs::create_dir_all(&temp_dir).await {
+                    eprintln!("[p2p] Failed to create temp dir: {}", e);
                     let _ = self.swarm.behaviour_mut().rr.send_response(
                         channel,
                         NearShareResponse::Error(format!("Dir creation failed: {}", e)),
                     );
                     return;
                 }
-                let file_path = format!("{}/{}", incoming_dir, filename);
+                let temp_path = format!("{}/{}", temp_dir, filename);
                 let result = async {
                     let mut file = if chunk_index == 0 {
-                        tokio::fs::File::create(&file_path).await?
+                        tokio::fs::File::create(&temp_path).await?
                     } else {
                         tokio::fs::OpenOptions::new()
                             .append(true)
-                            .open(&file_path)
+                            .open(&temp_path)
                             .await?
                     };
                     file.write_all(&data).await?;
@@ -361,29 +368,59 @@ impl P2PNode {
                 }
                 .await;
 
-                match result {
-                    Ok(()) => {
-                        println!(
-                            "[p2p] Received chunk {}/{} of {} from {}",
-                            chunk_index + 1,
-                            total_chunks,
-                            filename,
-                            peer
-                        );
-                        let _ = self
-                            .swarm
-                            .behaviour_mut()
-                            .rr
-                            .send_response(channel, NearShareResponse::FileChunkAck { chunk_index });
-                    }
-                    Err(e) => {
-                        eprintln!("[p2p] Failed to write chunk: {}", e);
+                if let Err(e) = result {
+                    eprintln!("[p2p] Failed to write chunk: {}", e);
+                    let _ = self.swarm.behaviour_mut().rr.send_response(
+                        channel,
+                        NearShareResponse::Error(format!("Write failed: {}", e)),
+                    );
+                    return;
+                }
+
+                println!(
+                    "[p2p] Received chunk {}/{} of {} from {}",
+                    chunk_index + 1,
+                    total_chunks,
+                    filename,
+                    peer
+                );
+
+                // If last chunk, encrypt the assembled file with our local key
+                if chunk_index + 1 == total_chunks {
+                    let encrypt_result = async {
+                        let plaintext = tokio::fs::read(&temp_path).await?;
+                        let nonce_bytes = rand::thread_rng().r#gen::<[u8; 12]>();
+                        #[allow(deprecated)]
+                        let nonce = Nonce::from_slice(&nonce_bytes);
+                        let ciphertext = self.cipher.encrypt(nonce, plaintext.as_ref())
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{:?}", e)))?;
+                        let mut encrypted = Vec::new();
+                        encrypted.extend_from_slice(&nonce_bytes);
+                        encrypted.extend_from_slice(&ciphertext);
+                        let final_dir = format!("uploads/incoming/{}", peer);
+                        tokio::fs::create_dir_all(&final_dir).await?;
+                        let final_path = format!("{}/{}", final_dir, filename);
+                        tokio::fs::write(&final_path, &encrypted).await?;
+                        tokio::fs::remove_file(&temp_path).await?;
+                        Ok::<(), std::io::Error>(())
+                    }.await;
+
+                    if let Err(e) = encrypt_result {
+                        eprintln!("[p2p] Failed to encrypt incoming file: {}", e);
                         let _ = self.swarm.behaviour_mut().rr.send_response(
                             channel,
-                            NearShareResponse::Error(format!("Write failed: {}", e)),
+                            NearShareResponse::Error(format!("Encrypt failed: {}", e)),
                         );
+                        return;
                     }
+                    println!("[p2p] Saved encrypted incoming file {} from {}", filename, peer);
                 }
+
+                let _ = self
+                    .swarm
+                    .behaviour_mut()
+                    .rr
+                    .send_response(channel, NearShareResponse::FileChunkAck { chunk_index });
             }
         }
     }
@@ -446,7 +483,7 @@ impl P2PNode {
                 respond_to,
             } => {
                 let file_path = format!("uploads/{}", filename);
-                let data = match tokio::fs::read(&file_path).await {
+                let encrypted_data = match tokio::fs::read(&file_path).await {
                     Ok(d) => d,
                     Err(e) => {
                         let _ = respond_to.send(Err(anyhow::anyhow!("Read failed: {}", e)));
@@ -454,7 +491,22 @@ impl P2PNode {
                     }
                 };
 
-                let chunks: Vec<Vec<u8>> = data.chunks(CHUNK_SIZE).map(|c| c.to_vec()).collect();
+                if encrypted_data.len() < 12 {
+                    let _ = respond_to.send(Err(anyhow::anyhow!("File too short")));
+                    return;
+                }
+                let (nonce_bytes, ciphertext) = encrypted_data.split_at(12);
+                #[allow(deprecated)]
+                let nonce = Nonce::from_slice(nonce_bytes);
+                let plaintext = match self.cipher.decrypt(nonce, ciphertext) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ = respond_to.send(Err(anyhow::anyhow!("Decryption failed: {:?}", e)));
+                        return;
+                    }
+                };
+
+                let chunks: Vec<Vec<u8>> = plaintext.chunks(CHUNK_SIZE).map(|c| c.to_vec()).collect();
                 if chunks.is_empty() {
                     let _ = respond_to.send(Ok(()));
                     return;

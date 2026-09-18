@@ -957,6 +957,30 @@
       }
     }
 
+    async function downloadIncomingFile(filename, fromPeer) {
+      setStatus('incomingStatus', `Downloading ${filename}...`);
+      try {
+        const response = await authorizedFetch(`/api/download/incoming/${encodeURIComponent(fromPeer)}/${encodeURIComponent(filename)}`);
+        if (!response.ok) {
+          setStatus('incomingStatus', 'Download failed.', 'error');
+          return;
+        }
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        setStatus('incomingStatus', '');
+      } catch (err) {
+        setStatus('incomingStatus', 'Network error during download.', 'error');
+      }
+    }
+
     async function loadIncomingFiles() {
       setStatus('incomingStatus', 'Loading...');
       try {
@@ -982,7 +1006,14 @@
             meta.textContent = `From ${file.from_peer.slice(0, 12)}... // ${(file.size / 1024).toFixed(1)} KB`;
             info.appendChild(name);
             info.appendChild(meta);
+
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-secondary btn-compact';
+            btn.textContent = 'Download';
+            btn.onclick = () => downloadIncomingFile(file.filename, file.from_peer);
+
             li.appendChild(info);
+            li.appendChild(btn);
             list.appendChild(li);
           });
         }

@@ -27,8 +27,9 @@ run:
 run-port PORT:
     PORT={{PORT}} cargo run --release
 
-# Run with cargo watch (auto-restart on changes)
+# Run with cargo watch (auto-restart on changes; installs cargo-watch if missing)
 watch:
+    @cargo watch --version > /dev/null 2>&1 || cargo install cargo-watch
     cargo watch -x "run --release"
 
 # Run lint + type-check

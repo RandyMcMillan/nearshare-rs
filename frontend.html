@@ -458,6 +458,7 @@
     <main>
       <section class="hero" id="hero">
         <div id="connectionPill" class="status-badge">Locked</div>
+        <div id="peerIdDisplay" class="status-msg" style="margin-bottom:0.6rem;font-size:0.75rem;"></div>
         <h1>Simple, Secure File Sharing</h1>
         <p>Private, end-to-end encrypted file sharing for you and your team.</p>
       </section>
@@ -519,11 +520,30 @@
 
         <section class="card">
           <div class="section-head">
+            <h2>Peer Network</h2>
+            <button class="btn btn-secondary btn-compact" onclick="loadPeers()">Refresh Peers</button>
+          </div>
+          <div class="status-badge" id="peerCountBadge" style="margin-bottom:0.6rem;">0 peers online</div>
+          <ul class="file-list" id="peerList"></ul>
+          <div class="status-msg hidden" id="peersStatus"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
             <h2>My Files</h2>
             <button class="btn btn-secondary btn-compact" onclick="listFiles()">Refresh List</button>
           </div>
           <ul class="file-list" id="fileList"></ul>
           <div class="status-msg hidden" id="filesStatus"></div>
+        </section>
+
+        <section class="card">
+          <div class="section-head">
+            <h2>Incoming Files</h2>
+            <button class="btn btn-secondary btn-compact" onclick="loadIncomingFiles()">Refresh Incoming</button>
+          </div>
+          <ul class="file-list" id="incomingList"></ul>
+          <div class="status-msg hidden" id="incomingStatus"></div>
         </section>
       </div>
     </main>
@@ -535,6 +555,7 @@
 
   <script>
     let token = null;
+    let peersCache = [];
     const SESSION_TOKEN_KEY = 'nearshare.session.token';
     const FILE_LIST_CACHE_KEY = 'nearshare.session.files';
     const THEME_KEY = 'nearshare.theme';
@@ -608,6 +629,9 @@
       howToUseSection.classList.add('hidden');
       logoutBtn.classList.remove('hidden');
       setConnected(true);
+      loadPeerId();
+      loadPeers();
+      loadIncomingFiles();
     }
 
     function showLoggedOutUi(message = '') {
@@ -620,6 +644,11 @@
       fileInput.value = '';
       uploadToggle.checked = false;
       dropzone.style.display = 'none';
+      peersCache = [];
+      document.getElementById('peerList').innerHTML = '';
+      document.getElementById('incomingList').innerHTML = '';
+      document.getElementById('peerCountBadge').textContent = '0 peers online';
+      document.getElementById('peerIdDisplay').textContent = '';
       setConnected(false);
       setStatus('authStatus', message);
     }
@@ -716,10 +745,51 @@
             btn.textContent = 'Download';
             btn.onclick = () => downloadFile(file);
 
+            const actions = document.createElement('div');
+            actions.style.display = 'flex';
+            actions.style.gap = '0.5rem';
+            actions.style.flexWrap = 'wrap';
+            actions.appendChild(btn);
+
+            if (peersCache.length > 0) {
+              const sendBtn = document.createElement('button');
+              sendBtn.className = 'btn btn-primary btn-compact';
+              sendBtn.textContent = 'Send';
+              sendBtn.onclick = () => {
+                if (peersCache.length === 1) {
+                  sendFileToPeer(file, peersCache[0].peer_id);
+                } else {
+                  const select = document.createElement('select');
+                  select.style.fontSize = '0.7rem';
+                  select.style.padding = '0.3rem';
+                  select.style.border = '3px solid var(--border)';
+                  peersCache.forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p.peer_id;
+                    opt.textContent = p.name;
+                    select.appendChild(opt);
+                  });
+                  const okBtn = document.createElement('button');
+                  okBtn.className = 'btn btn-primary btn-compact';
+                  okBtn.textContent = 'OK';
+                  okBtn.onclick = () => {
+                    sendFileToPeer(file, select.value);
+                    actions.removeChild(select);
+                    actions.removeChild(okBtn);
+                    actions.appendChild(sendBtn);
+                  };
+                  actions.removeChild(sendBtn);
+                  actions.appendChild(select);
+                  actions.appendChild(okBtn);
+                }
+              };
+              actions.appendChild(sendBtn);
+            }
+
             info.appendChild(name);
             info.appendChild(meta);
             li.appendChild(info);
-            li.appendChild(btn);
+            li.appendChild(actions);
             fileList.appendChild(li);
           });
         }
@@ -819,6 +889,107 @@
       document.body.dataset.theme = theme;
       localStorage.setItem(THEME_KEY, theme);
       themeToggle.textContent = theme === 'dark' ? 'Theme Light' : 'Theme Dark';
+    }
+
+    async function loadPeerId() {
+      try {
+        const response = await authorizedFetch('/api/peer_id');
+        if (!response.ok) return;
+        const data = await response.json();
+        const el = document.getElementById('peerIdDisplay');
+        if (el) {
+          el.textContent = `Node: ${data.name} // ${data.peer_id.slice(0, 16)}...`;
+        }
+      } catch (_) {}
+    }
+
+    async function loadPeers() {
+      setStatus('peersStatus', 'Scanning network...');
+      try {
+        const response = await authorizedFetch('/api/peers');
+        if (!response.ok) return;
+        const peers = await response.json();
+        const list = document.getElementById('peerList');
+        const badge = document.getElementById('peerCountBadge');
+        list.innerHTML = '';
+        badge.textContent = `${peers.length} peer${peers.length === 1 ? '' : 's'} online`;
+
+        peersCache = peers;
+        if (!peers.length) {
+          list.innerHTML = '<li class="file-item"><div class="file-info"><span class="name">No peers discovered</span><span class="meta">Make sure other NearShare nodes are on the same network</span></div></li>';
+        } else {
+          peers.forEach((peer) => {
+            const li = document.createElement('li');
+            li.className = 'file-item';
+            const info = document.createElement('div');
+            info.className = 'file-info';
+            const name = document.createElement('span');
+            name.className = 'name';
+            name.textContent = peer.name;
+            const meta = document.createElement('span');
+            meta.className = 'meta';
+            meta.textContent = peer.peer_id;
+            info.appendChild(name);
+            info.appendChild(meta);
+            li.appendChild(info);
+            list.appendChild(li);
+          });
+        }
+        setStatus('peersStatus', '');
+      } catch (err) {
+        setStatus('peersStatus', 'Could not load peers.', 'error');
+      }
+    }
+
+    async function sendFileToPeer(filename, peerId) {
+      setStatus('filesStatus', `Sending ${filename}...`);
+      try {
+        const response = await authorizedFetch(`/api/send/${encodeURIComponent(peerId)}/${encodeURIComponent(filename)}`, {
+          method: 'POST'
+        });
+        if (!response.ok) {
+          setStatus('filesStatus', 'Send failed.', 'error');
+          return;
+        }
+        setStatus('filesStatus', `${filename} sent!`, 'success');
+      } catch (err) {
+        setStatus('filesStatus', 'Network error during send.', 'error');
+      }
+    }
+
+    async function loadIncomingFiles() {
+      setStatus('incomingStatus', 'Loading...');
+      try {
+        const response = await authorizedFetch('/api/incoming');
+        if (!response.ok) return;
+        const files = await response.json();
+        const list = document.getElementById('incomingList');
+        list.innerHTML = '';
+
+        if (!files.length) {
+          list.innerHTML = '<li class="file-item"><div class="file-info"><span class="name">No incoming files</span><span class="meta">Files received from peers appear here</span></div></li>';
+        } else {
+          files.forEach((file) => {
+            const li = document.createElement('li');
+            li.className = 'file-item';
+            const info = document.createElement('div');
+            info.className = 'file-info';
+            const name = document.createElement('span');
+            name.className = 'name';
+            name.textContent = file.filename;
+            const meta = document.createElement('span');
+            meta.className = 'meta';
+            meta.textContent = `From ${file.from_peer.slice(0, 12)}... // ${(file.size / 1024).toFixed(1)} KB`;
+            info.appendChild(name);
+            info.appendChild(meta);
+            li.appendChild(info);
+            list.appendChild(li);
+          });
+        }
+        setStatus('incomingStatus', '');
+      } catch (err) {
+        setStatus('incomingStatus', 'Could not load incoming files.', 'error');
+      }
     }
 
     async function restoreSession() {

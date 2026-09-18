@@ -1,22 +1,20 @@
-// #[allow(dead_code)]
-use actix_web::{App, HttpResponse, HttpServer, Responder, body, web};
+mod p2p;
+
+use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use actix_multipart::Multipart;
 use futures_util::{StreamExt, TryStreamExt};
 use actix_web::middleware::Logger;
 use serde::{Serialize,Deserialize};
 use aes_gcm::{
-    Aes256Gcm, Nonce, aead::{Aead, KeyInit,OsRng}, aes
+    Aes256Gcm, Nonce, aead::{Aead, KeyInit,OsRng}
 };
 use std::env;
-// use rand_core::OsRng;
-use typenum::U12;
 use rand::Rng;
 use mdns_sd::{ServiceDaemon,ServiceInfo};
 use tokio::{fs, io::AsyncWriteExt};
-use std::{fmt::format, iter::Copied, ops::Mul, path, sync::{Arc, Mutex}, vec};
+use std::{sync::{Arc, Mutex}};
 use std::collections::HashMap;
 use std::path::Path;
-use std::io::Write;
 
 
 #[derive(Serialize,Deserialize)]
@@ -37,6 +35,7 @@ struct SessionResponse {
 struct AppState {
     auth_tokens: Arc<Mutex<HashMap<String,String>>>,
     encryption_key:Aes256Gcm,
+    p2p: p2p::P2PHandle,
 }
 
 async fn index() -> impl Responder{
@@ -131,7 +130,7 @@ async fn upload_file(
         let mut files_saved = Vec::new();
 
         while let Ok(Some(mut field)) = payload.try_next().await {
-            if let Some(content_disposition) = field.content_disposition(){
+            if let Some(_content_disposition) = field.content_disposition(){
                 let file_name = if let Some(content_disposition) = field.content_disposition(){
                     content_disposition.get_filename().unwrap_or("unnamed").to_string()
                 }else {
@@ -197,6 +196,7 @@ async fn download_file(
                 return HttpResponse::InternalServerError().finish();
             }
             let (nonce_bytes,ciphertext) = encrypted_data.split_at(12);
+            #[allow(deprecated)]
             let nonce = Nonce::from_slice(nonce_bytes);
 
             return match state.encryption_key.decrypt(nonce, ciphertext){
@@ -218,6 +218,66 @@ async fn download_file(
 
     HttpResponse::Unauthorized().finish()
 
+}
+
+#[derive(Serialize)]
+struct PeerIdResponse {
+    peer_id: String,
+    name: String,
+}
+
+async fn get_peer_id(state: web::Data<AppState>) -> impl Responder {
+    HttpResponse::Ok().json(PeerIdResponse {
+        peer_id: state.p2p.local_peer_id.to_string(),
+        name: state.p2p.name.clone(),
+    })
+}
+
+async fn list_peers(state: web::Data<AppState>, req: actix_web::HttpRequest) -> impl Responder {
+    if authenticated_username(&req, &state).is_none() {
+        return HttpResponse::Unauthorized().finish();
+    }
+    let peers = state.p2p.list_peers().await;
+    HttpResponse::Ok().json(peers)
+}
+
+#[derive(Serialize)]
+struct SendResult {
+    status: String,
+}
+
+async fn send_file_to_peer(
+    path: web::Path<(String, String)>,
+    state: web::Data<AppState>,
+    req: actix_web::HttpRequest,
+) -> impl Responder {
+    if authenticated_username(&req, &state).is_none() {
+        return HttpResponse::Unauthorized().finish();
+    }
+    let (peer_id_str, filename) = path.into_inner();
+    let peer_id = match peer_id_str.parse::<libp2p::PeerId>() {
+        Ok(id) => id,
+        Err(_) => return HttpResponse::BadRequest().body("Invalid peer ID"),
+    };
+    match state.p2p.send_file(peer_id, filename).await {
+        Ok(()) => HttpResponse::Ok().json(SendResult {
+            status: "sent".to_string(),
+        }),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Send failed: {}", e)),
+    }
+}
+
+async fn list_incoming(
+    state: web::Data<AppState>,
+    req: actix_web::HttpRequest,
+) -> impl Responder {
+    if authenticated_username(&req, &state).is_none() {
+        return HttpResponse::Unauthorized().finish();
+    }
+    match state.p2p.get_incoming_files().await {
+        Ok(files) => HttpResponse::Ok().json(files),
+        Err(e) => HttpResponse::InternalServerError().body(format!("Failed to list incoming: {}", e)),
+    }
 }
 
 async fn clear_uploads_dir() -> std::io::Result<()> {
@@ -242,34 +302,39 @@ async fn main() -> std::io::Result<()> {
     let key = Aes256Gcm::generate_key(&mut OsRng);
     let cipher = Aes256Gcm::new(&key);
 
+    let hostname = env::var("COMPUTERNAME")
+        .or_else(|_| env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "SecureFileShare".to_string());
+
+    let (p2p_node, p2p_handle) = p2p::P2PNode::new(hostname.clone()).await
+        .expect("Failed to create P2P node");
+    tokio::spawn(p2p_node.run());
+
     let auth_tokens = Arc::new(Mutex::new(HashMap::new()));
     let state = web::Data::new(AppState{
         auth_tokens :auth_tokens.clone(),
-        encryption_key:cipher
+        encryption_key:cipher,
+        p2p: p2p_handle,
     });
 
-let hostname = format!("{}.local.", 
-    env::var("COMPUTERNAME")
-        .or_else(|_| env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "SecureFileShare".to_string())
-);
+    let hostname_mdns = format!("{}.local.", hostname);
     let mdns = ServiceDaemon::new().expect("Failed to create mDNS daemon");
     let service_info = ServiceInfo::new(
     "_fileshare._tcp.local.",     // Service type
     "SecureFileShare",             // Instance name
-    &hostname,                     // Hostname (use the variable you created!)
+    &hostname_mdns,                // Hostname
     "",                            // IP address (empty is fine)
     8080,                          // Port
     None                           // TXT records
     ).expect("Invalid Service Info");
-    
+
     mdns.register(service_info).expect("failed to register mdns servifce");
 
     println!("NearShare-rs starting at port 8080");
     println!("use username:admin password:password");
 
 
-    return HttpServer::new(move||{
+    HttpServer::new(move||{
             App::new()
                     .app_data(state.clone())
                     .wrap(Logger::default())
@@ -278,8 +343,12 @@ let hostname = format!("{}.local.",
                     .route("/api/session", web::get().to(session))
                     .route("/api/logout", web::post().to(logout))
                     .route("/api/upload",web::post().to(upload_file))
-                    .route("/api/files", web::get().to(list_files)) 
+                    .route("/api/files", web::get().to(list_files))
                     .route("/api/download/{filename}", web::get().to(download_file))
+                    .route("/api/peer_id", web::get().to(get_peer_id))
+                    .route("/api/peers", web::get().to(list_peers))
+                    .route("/api/send/{peer_id}/{filename}", web::post().to(send_file_to_peer))
+                    .route("/api/incoming", web::get().to(list_incoming))
         })
         .bind("0.0.0.0:8080")?
         .run()

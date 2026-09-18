@@ -15,3 +15,6 @@ futures-util = "0.3"
 typenum = "1.19.0"
 generic-array = "0.14.9"
 rand_core = "0.9.3"
+libp2p = { version = "0.54", features = ["tokio", "mdns", "noise", "yamux", "tcp", "request-response", "cbor", "macros"] }
+serde_json = "1.0"
+anyhow = "1.0"

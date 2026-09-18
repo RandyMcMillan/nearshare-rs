@@ -1,9 +1,9 @@
 use actix_web::{App, HttpResponse, HttpServer, Responder, web};
 use nearshare_rs::p2p;
+use nearshare_rs::models::*;
 use actix_multipart::Multipart;
 use futures_util::{StreamExt, TryStreamExt};
 use actix_web::middleware::Logger;
-use serde::{Serialize,Deserialize};
 use aes_gcm::{
     Aes256Gcm, Nonce, aead::{Aead, KeyInit,OsRng}
 };
@@ -15,32 +15,6 @@ use std::{sync::{Arc, Mutex}};
 use std::collections::HashMap;
 use std::path::Path;
 
-
-#[derive(Serialize,Deserialize)]
-struct AuthRequest{
-    username:String,    
-    password:String
-}
-#[derive(Serialize,Deserialize)]
-struct AuthResponse{
-    token:String
-}
-
-#[derive(Serialize)]
-struct SessionResponse {
-    username: String,
-}
-
-#[derive(Serialize,Deserialize,Default)]
-struct UploadMeta {
-    git_repos: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct FileListResponse {
-    files: Vec<String>,
-    git_repos: Vec<String>,
-}
 
 struct AppState {
     auth_tokens: Arc<Mutex<HashMap<String,String>>>,
@@ -378,12 +352,6 @@ async fn download_incoming_file(
     HttpResponse::Unauthorized().finish()
 }
 
-#[derive(Serialize)]
-struct PeerIdResponse {
-    peer_id: String,
-    name: String,
-}
-
 async fn get_peer_id(state: web::Data<AppState>) -> impl Responder {
     HttpResponse::Ok().json(PeerIdResponse {
         peer_id: state.p2p.local_peer_id.to_string(),
@@ -397,11 +365,6 @@ async fn list_peers(state: web::Data<AppState>, req: actix_web::HttpRequest) -> 
     }
     let peers = state.p2p.list_peers().await;
     HttpResponse::Ok().json(peers)
-}
-
-#[derive(Serialize)]
-struct SendResult {
-    status: String,
 }
 
 async fn send_file_to_peer(

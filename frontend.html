@@ -1075,7 +1075,7 @@
             name.textContent = file.filename;
             const meta = document.createElement('span');
             meta.className = 'meta';
-            meta.textContent = `From ${file.from_peer.slice(0, 12)}... // ${(file.size / 1024).toFixed(1)} KB`;
+            meta.textContent = `From ${file.from_peer} // ${(file.size / 1024).toFixed(1)} KB`;
             info.appendChild(name);
             info.appendChild(meta);
 

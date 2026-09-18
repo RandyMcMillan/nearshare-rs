@@ -10,7 +10,7 @@ serde = {version="1.0",features = ["derive"]}
 aes-gcm = "0.10"
 rand = "0.8"
 mdns-sd = "0.11"
-tokio = {version = "1.40", features = ["full"]}
+tokio = {version = "1.40", features = ["full","macros", "rt-multi-thread"]}
 futures-util = "0.3"
 typenum = "1.19.0"
 generic-array = "0.14.9"
@@ -19,9 +19,15 @@ libp2p = { version = "0.54", features = ["tokio", "mdns", "noise", "yamux", "tcp
 serde_json = "1.0"
 anyhow = "1.0"
 ignore = "0.4"
+crossterm = { version = "0.29", features = ["event-stream"] }
 
 [dev-dependencies]
+ratatui = "0.30.2"
+color-eyre = "0.6"
+crossterm = { version = "0.29", features = ["event-stream"] }
 clap = { version = "4", features = ["derive"] }
 regex = "1"
 walkdir = "2"
 tempfile = "3"
+octocrab = "0.54"
+tokio-stream = "0.1"

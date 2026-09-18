@@ -19,6 +19,7 @@ libp2p = { version = "0.54", features = ["tokio", "mdns", "noise", "yamux", "tcp
 serde_json = "1.0"
 anyhow = "1.0"
 ignore = "0.4"
+regex = "1"
 crossterm = { version = "0.29", features = ["event-stream"] }
 
 [dev-dependencies]

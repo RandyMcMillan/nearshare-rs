@@ -1,6 +1,7 @@
 pub mod p2p;
 pub mod models;
 pub mod handlers;
+pub mod repo_flattener;
 
 use actix_web::{App, HttpServer, web};
 use actix_web::middleware::Logger;

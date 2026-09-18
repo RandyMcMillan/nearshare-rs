@@ -1,0 +1,201 @@
+use anyhow::{Context, Result};
+use regex::Regex;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+pub struct FileInfo {
+    pub rel: String,
+    pub size: u64,
+    pub content: Option<String>,
+}
+
+pub fn git_short_hash(repo_path: &Path) -> Result<String> {
+    let out = Command::new("git")
+        .args(["-C", repo_path.to_string_lossy().as_ref(), "rev-parse", "--short", "HEAD"])
+        .output()
+        .context("git rev-parse --short HEAD")?;
+
+    if !out.status.success() {
+        anyhow::bail!("git rev-parse --short HEAD failed");
+    }
+
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+pub fn normalize_repo_url(repo_url: &str) -> String {
+    let repo_url = repo_url.strip_prefix("git+").unwrap_or(repo_url);
+    if let Some(normalized) = normalize_scp_style_url(repo_url) {
+        return normalized;
+    }
+    repo_url.to_string()
+}
+
+fn normalize_scp_style_url(repo_url: &str) -> Option<String> {
+    if repo_url.contains("://") {
+        return None;
+    }
+
+    let (left, right) = repo_url.split_once(':')?;
+    if left.is_empty()
+        || right.is_empty()
+        || left.contains('/')
+        || right.starts_with('/')
+        || right.starts_with('\\')
+    {
+        return None;
+    }
+
+    Some(format!("ssh://{left}/{right}"))
+}
+
+pub fn default_output_path(repo_url: &str, short_hash: &str) -> PathBuf {
+    if short_hash == "unknown" {
+        return PathBuf::from("repo_flat.html");
+    }
+
+    let safe_repo = sanitize_filename(repo_url);
+    PathBuf::from(format!("{safe_repo}@{short_hash}.html"))
+}
+
+pub fn sanitize_filename(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_underscore = false;
+
+    for ch in input.chars() {
+        let safe = matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '.' | '-' | '_');
+        let mapped = if safe { ch } else { '_' };
+        if mapped == '_' {
+            if prev_underscore {
+                continue;
+            }
+            prev_underscore = true;
+        } else {
+            prev_underscore = false;
+        }
+        out.push(mapped);
+    }
+
+    while out.ends_with('_') {
+        out.pop();
+    }
+
+    if out.is_empty() {
+        "repo".to_string()
+    } else {
+        out
+    }
+}
+
+pub fn is_binary(path: &Path) -> bool {
+    fs::read(path)
+        .map(|b| b.iter().take(4096).any(|&x| x == 0))
+        .unwrap_or(true)
+}
+
+pub fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+pub fn highlight_code(code: &str) -> String {
+    let escaped = escape_html(code);
+    let re_kw = Regex::new(r"\b(fn|let|mut|var|const|if|else|return|import|export|class|struct|impl|pub|type|use|for|while|match)\b").unwrap();
+    let re_str = Regex::new(r#"(&quot;.*?&quot;|&#39;.*?&#39;)"#).unwrap();
+    let re_comment = Regex::new(r"((//|#).*?(\n|$))").unwrap();
+
+    let first_pass = re_kw.replace_all(
+        &escaped,
+        r#"<span style=\"color: #d73a49; font-weight: bold;\">$1</span>"#,
+    );
+    let second_pass =
+        re_str.replace_all(&first_pass, r#"<span style=\"color: #032f62;\">$1</span>"#);
+    let third_pass = re_comment.replace_all(
+        &second_pass,
+        r#"<span style=\"color: #6a737d; font-style: italic;\">$1</span>"#,
+    );
+
+    third_pass.to_string()
+}
+
+pub fn build_html(url: &str, files: Vec<FileInfo>) -> Result<String> {
+    let mut toc = String::new();
+    let mut sections = String::new();
+    let mut cxml = String::from("&lt;documents&gt;\n");
+
+    for (idx, f) in files.iter().enumerate() {
+        let anchor = format!("f-{}", idx);
+        toc.push_str(&format!("<li><a href='#{}'>{}</a></li>", anchor, f.rel));
+
+        let body = match &f.content {
+            Some(c) => {
+                cxml.push_str(&format!(
+                    "&lt;document index='{}'&gt;\n&lt;source&gt;{}&lt;/source&gt;\n&lt;document_content&gt;\n{}\n&lt;/document_content&gt;\n&lt;/document&gt;\n",
+                    idx + 1,
+                    f.rel,
+                    escape_html(c)
+                ));
+                format!(
+                    "<pre style='background:#f6f8fa; padding:10px; border-radius:5px;'><code>{}</code></pre>",
+                    highlight_code(c)
+                )
+            }
+            None => format!(
+                "<p style=\"color:red;\">Skipped: Binary or too large (Size: {} bytes).</p>",
+                f.size
+            ),
+        };
+
+        sections.push_str(&format!(
+            "<section id='{}' style='border-top:1px solid #eee; margin-top:20px;'><h3>{}</h3>{}</section>",
+            anchor, f.rel, body
+        ));
+    }
+    cxml.push_str("&lt;/documents&gt;");
+
+    Ok(format!(
+        r#"
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+body {{ font-family: sans-serif; display: grid; grid-template-columns: 250px 1fr; margin: 0; }}
+nav {{ border-right: 1px solid #ccc; height: 100vh; overflow-y: auto; padding: 10px; position: sticky; top: 0; background: #f9f9f9; }}
+main {{ padding: 20px; }}
+textarea {{ width: 100%; height: 500px; }}
+.view-btn {{ padding: 10px; cursor: pointer; }}
+</style>
+<script>
+function show(id) {{
+document.getElementById('human').style.display = id === 'h' ? 'block' : 'none';
+document.getElementById('llm').style.display = id === 'l' ? 'block' : 'none';
+}}
+</script>
+</head>
+<body>
+<nav>
+<strong>Files</strong>
+<ul style="padding-left:15px; font-size:12px;">{toc}</ul>
+</nav>
+<main>
+<h1>Repo: {url}</h1>
+<button class="view-btn" onclick="show('h')">👤 Human View</button>
+<button class="view-btn" onclick="show('l')">🤖 LLM View</button>
+<div id="human">{sections}</div>
+<div id="llm" style="display:none;">
+<h2>LLM CXML</h2>
+<textarea readonly>{cxml}</textarea>
+</div>
+</main>
+</body></html>
+"#,
+        url = url,
+        toc = toc,
+        sections = sections,
+        cxml = cxml
+    ))
+}

@@ -740,7 +740,9 @@
         const response = await authorizedFetch('/api/files');
         if (!response.ok) return;
 
-        const files = await response.json();
+        const data = await response.json();
+        const files = data.files || [];
+        const gitRepos = data.git_repos || [];
         cacheFileList(files);
         fileList.innerHTML = '';
 
@@ -761,7 +763,14 @@
 
             const meta = document.createElement('span');
             meta.className = 'meta';
-            meta.textContent = 'Securely Stored';
+            // Check if file lives inside a detected git repo
+            const repo = gitRepos.find(r => file.startsWith(r + '/') || file === r);
+            if (repo) {
+              meta.textContent = 'Git Repo';
+              meta.style.color = 'var(--ok)';
+            } else {
+              meta.textContent = 'Securely Stored';
+            }
 
             const btn = document.createElement('button');
             btn.className = 'btn btn-secondary btn-compact';

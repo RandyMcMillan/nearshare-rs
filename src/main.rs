@@ -32,6 +32,17 @@ struct SessionResponse {
     username: String,
 }
 
+#[derive(Serialize,Deserialize,Default)]
+struct UploadMeta {
+    git_repos: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct FileListResponse {
+    files: Vec<String>,
+    git_repos: Vec<String>,
+}
+
 struct AppState {
     auth_tokens: Arc<Mutex<HashMap<String,String>>>,
     encryption_key:Aes256Gcm,
@@ -161,6 +172,39 @@ async fn upload_file(
         file.write_all(&data).await.unwrap();
     }
 
+    // Detect git repos in the uploaded tree
+    let mut git_repos = Vec::new();
+    let tmp_path_obj = Path::new(&tmp_base);
+    if tmp_path_obj.join(".git").is_dir() {
+        git_repos.push(".".to_string());
+    }
+    if let Ok(entries) = std::fs::read_dir(tmp_path_obj) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && path.join(".git").is_dir() {
+                git_repos.push(path.file_name().unwrap_or_default().to_string_lossy().to_string());
+            }
+        }
+    }
+    // Merge with existing metadata
+    let meta_path = "uploads/.nearshare-meta.json";
+    let mut meta: UploadMeta = if Path::new(meta_path).exists() {
+        fs::read_to_string(meta_path).await
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    } else {
+        UploadMeta::default()
+    };
+    for repo in git_repos {
+        if !meta.git_repos.contains(&repo) {
+            meta.git_repos.push(repo);
+        }
+    }
+    if let Ok(json) = serde_json::to_string(&meta) {
+        let _ = fs::write(meta_path, json).await;
+    }
+
     // Phase 2: walk temp directory respecting .gitignore, encrypt and move
     let mut files_saved = Vec::new();
     let walker = ignore::WalkBuilder::new(&tmp_base)
@@ -238,13 +282,21 @@ async fn list_files(
                 Err(_) => continue,
             };
             let rel_str = rel_path.to_string_lossy().to_string();
-            if rel_str.starts_with("incoming") || rel_str.starts_with("/.tmp") || rel_str.starts_with(".tmp") {
+            if rel_str.starts_with("incoming") || rel_str.starts_with("/.tmp") || rel_str.starts_with(".tmp") || rel_str.starts_with(".nearshare-meta") {
                 continue;
             }
             files.push(rel_str);
         }
         files.sort();
-        return HttpResponse::Ok().json(files);
+        let meta: UploadMeta = fs::read_to_string("uploads/.nearshare-meta.json")
+            .await
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        return HttpResponse::Ok().json(FileListResponse {
+            files,
+            git_repos: meta.git_repos,
+        });
     }
     HttpResponse::Unauthorized().finish()
 }

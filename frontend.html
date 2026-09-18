@@ -531,7 +531,10 @@
         <section class="card">
           <div class="section-head">
             <h2>My Files</h2>
-            <button class="btn btn-secondary btn-compact" onclick="listFiles()">Refresh List</button>
+            <div style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+              <button class="btn btn-secondary btn-compact" onclick="listFiles()">Refresh List</button>
+              <button class="btn btn-primary btn-compact" id="sendAllBtn" onclick="sendAllFiles()">Send All to Peers</button>
+            </div>
           </div>
           <ul class="file-list" id="fileList"></ul>
           <div class="status-msg hidden" id="filesStatus"></div>
@@ -954,6 +957,48 @@
         setStatus('filesStatus', `${filename} sent!`, 'success');
       } catch (err) {
         setStatus('filesStatus', 'Network error during send.', 'error');
+      }
+    }
+
+    async function sendAllFiles() {
+      const files = JSON.parse(sessionStorage.getItem(FILE_LIST_CACHE_KEY) || '[]');
+      if (!files.length) {
+        setStatus('filesStatus', 'No files to send.', 'error');
+        return;
+      }
+      if (!peersCache.length) {
+        setStatus('filesStatus', 'No peers discovered.', 'error');
+        return;
+      }
+
+      const btn = document.getElementById('sendAllBtn');
+      btn.disabled = true;
+      setStatus('filesStatus', `Sending ${files.length} file(s) to ${peersCache.length} peer(s)...`);
+
+      let sent = 0;
+      let failed = 0;
+      for (const file of files) {
+        for (const peer of peersCache) {
+          try {
+            const response = await authorizedFetch(`/api/send/${encodeURIComponent(peer.peer_id)}/${encodeURIComponent(file)}`, {
+              method: 'POST'
+            });
+            if (response.ok) {
+              sent++;
+            } else {
+              failed++;
+            }
+          } catch (err) {
+            failed++;
+          }
+        }
+      }
+
+      btn.disabled = false;
+      if (failed === 0) {
+        setStatus('filesStatus', `Sent ${sent} transfer(s) successfully!`, 'success');
+      } else {
+        setStatus('filesStatus', `Sent ${sent}, failed ${failed}.`, 'error');
       }
     }
 

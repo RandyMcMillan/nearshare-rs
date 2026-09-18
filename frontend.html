@@ -499,6 +499,16 @@
       <!-- Dashboard (Visible after login) -->
       <div id="dashboard" class="hidden">
         <section class="card">
+          <div class="section-head">
+            <h2>Peer Network</h2>
+            <button class="btn btn-secondary btn-compact" onclick="loadPeers()">Refresh Peers</button>
+          </div>
+          <div class="status-badge" id="peerCountBadge" style="margin-bottom:0.6rem;">0 peers online</div>
+          <ul class="file-list" id="peerList"></ul>
+          <div class="status-msg hidden" id="peersStatus"></div>
+        </section>
+
+        <section class="card">
           <h2>Upload Files</h2>
           <input type="checkbox" id="uploadToggle" class="hidden" />
           <label for="uploadToggle" class="toggle-wrap">
@@ -516,16 +526,6 @@
             <button class="btn btn-secondary" onclick="clearSelection()">Clear</button>
           </div>
           <div class="status-msg hidden" id="uploadStatus"></div>
-        </section>
-
-        <section class="card">
-          <div class="section-head">
-            <h2>Peer Network</h2>
-            <button class="btn btn-secondary btn-compact" onclick="loadPeers()">Refresh Peers</button>
-          </div>
-          <div class="status-badge" id="peerCountBadge" style="margin-bottom:0.6rem;">0 peers online</div>
-          <ul class="file-list" id="peerList"></ul>
-          <div class="status-msg hidden" id="peersStatus"></div>
         </section>
 
         <section class="card">

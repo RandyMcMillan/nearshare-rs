@@ -632,6 +632,8 @@
       howToUseSection.classList.add('hidden');
       logoutBtn.classList.remove('hidden');
       setConnected(true);
+      uploadToggle.checked = true;
+      dropzone.style.display = 'block';
       loadPeerId();
       loadPeers();
       loadIncomingFiles();
